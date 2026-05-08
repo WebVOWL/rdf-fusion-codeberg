@@ -42,53 +42,59 @@ impl QueryTripleStream {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Triple, QueryEvaluationError>>> {
-        // If we have buffered results, use them
-        if let Some(result) = self.buffered_results.pop() {
-            return Poll::Ready(Some(result));
-        }
-
         // If we do not have buffered results, create them
-        let solution = match ready!(self.inner.poll_next_unpin(cx)) {
-            None => return Poll::Ready(None),
-            Some(Ok(solution)) => solution,
-            Some(Err(error)) => return Poll::Ready(Some(Err(error))),
-        };
+        let result = loop {
+            let solution = match ready!(self.inner.poll_next_unpin(cx)) {
+                None => return Poll::Ready(None),
+                Some(Ok(solution)) => solution,
+                Some(Err(error)) => return Poll::Ready(Some(Err(error))),
+            };
 
-        for template in &self.template {
-            let subject =
-                get_triple_template_value(&template.subject, &solution, &mut self.bnodes)
-                    .and_then(|t| t.try_into().ok());
-            let predicate = get_triple_template_value(
-                &TermPattern::from(template.predicate.clone()),
-                &solution,
-                &mut self.bnodes,
-            )
-            .and_then(|t| t.try_into().ok());
-            let object =
-                get_triple_template_value(&template.object, &solution, &mut self.bnodes);
+            for template in &self.template {
+                let subject = get_triple_template_value(
+                    &template.subject,
+                    &solution,
+                    &mut self.bnodes,
+                )
+                .and_then(|t| t.try_into().ok());
+                let predicate = get_triple_template_value(
+                    &TermPattern::from(template.predicate.clone()),
+                    &solution,
+                    &mut self.bnodes,
+                )
+                .and_then(|t| t.try_into().ok());
+                let object = get_triple_template_value(
+                    &template.object,
+                    &solution,
+                    &mut self.bnodes,
+                );
 
-            if let (Some(subject), Some(predicate), Some(object)) =
-                (subject, predicate, object)
-            {
-                let triple = Triple {
-                    subject,
-                    predicate,
-                    object,
-                };
-                // We allocate new blank nodes for each solution,
-                // triples with blank nodes are likely to be new.
-                let new_triple = triple.subject.is_blank_node()
-                    || triple.object.is_blank_node()
-                    || self.already_emitted_results.insert(triple.clone());
-                if new_triple {
-                    self.buffered_results.push(Ok(triple));
+                if let (Some(subject), Some(predicate), Some(object)) =
+                    (subject, predicate, object)
+                {
+                    let triple = Triple {
+                        subject,
+                        predicate,
+                        object,
+                    };
+                    // We allocate new blank nodes for each solution,
+                    // triples with blank nodes are likely to be new.
+                    let new_triple = triple.subject.is_blank_node()
+                        || triple.object.is_blank_node()
+                        || self.already_emitted_results.insert(triple.clone());
+                    if new_triple {
+                        self.buffered_results.push(Ok(triple));
+                    }
                 }
             }
-        }
-        self.bnodes.clear(); // We do not reuse blank nodes
+            self.bnodes.clear(); // We do not reuse blank nodes
+            if let Some(result) = self.buffered_results.pop() {
+                break result;
+            }
+        };
 
-        // re-run procedure
-        self.poll_inner(cx)
+        // If we have buffered results, use them
+        Poll::Ready(Some(result))
     }
 }
 
